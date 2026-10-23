@@ -47,11 +47,22 @@
   function isValid(t){
     return /^https:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/\S*)?$/.test(t) && t.indexOf(' ') === -1 && t.length < 300;
   }
+  function fetchTarget(){
+    // Primary: the GitHub API serves the repo's target.txt with no CDN
+    // lag, so the door follows tunnel rotations within seconds.
+    // Fallback: the Pages copy of target.txt (can lag minutes on CDN).
+    return fetch('https://api.github.com/repos/Dynamic89H/bigface-door/contents/target.txt', {cache: 'no-store', headers: {'Accept': 'application/vnd.github.raw'}})
+      .then(function(r){ if(!r.ok) throw new Error('api bad status'); return r.text(); })
+      .then(function(t){ if (!isValid((t || '').trim())) throw new Error('api bad target'); return t; })
+      .catch(function(){
+        return fetch('target.txt?v=' + Date.now(), {cache: 'no-store'})
+          .then(function(r){ if(!r.ok) throw new Error('bad status'); return r.text(); });
+      });
+  }
   function go(){
     attempts++;
     statusEl.textContent = attempts > 1 ? ('Still connecting… (try ' + attempts + ')') : 'Connecting…';
-    fetch('target.txt?v=' + Date.now(), {cache: 'no-store'})
-      .then(function(r){ if(!r.ok) throw new Error('bad status'); return r.text(); })
+    fetchTarget()
       .then(function(txt){
         var target = (txt || '').trim();
         if (!isValid(target)) throw new Error('bad target');
