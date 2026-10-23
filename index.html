@@ -78,7 +78,11 @@
           return;
         }
         statusEl.textContent = 'Opening Big Face Social…';
-        window.location.replace(base + remainder());
+        // New visitors land on Look Inside — the public tour of the
+        // kingdom that ends at signup. An explicit door path (rare)
+        // still goes exactly where it pointed.
+        var rest = remainder();
+        window.location.replace(base + (rest ? rest : '/inside'));
       })
       .catch(function(){
         statusEl.textContent = 'Connection hiccup — retrying in 10 seconds…';
