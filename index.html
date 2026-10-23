@@ -35,6 +35,15 @@
     if (!rest) return '';
     return '/' + rest + window.location.search + window.location.hash;
   }
+  function ownerKey(){
+    // Owner mode: the boss's private bookmark carries his auto-door key in
+    // the URL fragment (#k=...). Fragments are never sent to any server —
+    // this page's JS is the only thing that ever reads it, here in the
+    // browser — and it is not part of this repo or page source.
+    var h = window.location.hash || '';
+    if (h.indexOf('#k=') !== 0 || h.length <= 3) return '';
+    try { return decodeURIComponent(h.slice(3)); } catch (e) { return h.slice(3); }
+  }
   function isValid(t){
     return /^https:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/\S*)?$/.test(t) && t.indexOf(' ') === -1 && t.length < 300;
   }
@@ -46,8 +55,19 @@
       .then(function(txt){
         var target = (txt || '').trim();
         if (!isValid(target)) throw new Error('bad target');
+        var base = target.replace(/\/+$/, '');
+        var key = ownerKey();
+        if (key) {
+          // Owner entry: hand the key straight to the app's owner-enter
+          // endpoint on the CURRENT app address (from target.txt, so this
+          // bookmark survives every tunnel rotation). The endpoint 302s
+          // to the app's /door page, which completes the sign-in.
+          statusEl.textContent = 'Opening your door…';
+          window.location.replace(base + '/api/auth/owner-enter?key=' + encodeURIComponent(key));
+          return;
+        }
         statusEl.textContent = 'Opening Big Face Social…';
-        window.location.replace(target.replace(/\/+$/, '') + remainder());
+        window.location.replace(base + remainder());
       })
       .catch(function(){
         statusEl.textContent = 'Connection hiccup — retrying in 10 seconds…';
