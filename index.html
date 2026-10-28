@@ -47,32 +47,91 @@
   function isValid(t){
     return /^https:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/\S*)?$/.test(t) && t.indexOf(' ') === -1 && t.length < 300;
   }
-  function fetchTarget(){
-    // Primary: the GitHub API serves the repo's target.txt with no CDN
-    // lag, so the door follows tunnel rotations within seconds.
-    // Fallback: the Pages copy of target.txt (can lag minutes on CDN).
-    return fetch('https://api.github.com/repos/Dynamic89H/bigface-door/contents/target.txt', {cache: 'no-store', headers: {'Accept': 'application/vnd.github.raw'}})
-      .then(function(r){ if(!r.ok) throw new Error('api bad status'); return r.text(); })
-      .then(function(t){ if (!isValid((t || '').trim())) throw new Error('api bad target'); return t; })
-      .catch(function(){
-        return fetch('target.txt?v=' + Date.now(), {cache: 'no-store'})
-          .then(function(r){ if(!r.ok) throw new Error('bad status'); return r.text(); });
-      });
+  function fetchOrigins(){
+    // Dual-hot list: the GitHub API serves the repo's origins.json with
+    // no CDN lag, so the door follows tunnel rotations within seconds.
+    // Fallbacks, in order: the Pages copy of origins.json (can lag
+    // minutes on CDN), then target.txt (API, then Pages) as a
+    // single-origin list — preserving the old behavior exactly when
+    // origins.json is absent.
+    function apiFile(path){
+      return fetch('https://api.github.com/repos/Dynamic89H/bigface-door/contents/' + path, {cache: 'no-store', headers: {'Accept': 'application/vnd.github.raw'}})
+        .then(function(r){ if(!r.ok) throw new Error('api bad status'); return r.text(); });
+    }
+    function pagesFile(path){
+      return fetch(path + '?v=' + Date.now(), {cache: 'no-store'})
+        .then(function(r){ if(!r.ok) throw new Error('bad status'); return r.text(); });
+    }
+    function parseOrigins(txt){
+      try {
+        var j = JSON.parse((txt || '').trim());
+        if (j && j.origins && j.origins.length) return j.origins.filter(isValid);
+      } catch (e) {}
+      return [];
+    }
+    function single(txt){
+      var one = (txt || '').trim();
+      return isValid(one) ? [one] : [];
+    }
+    return apiFile('origins.json').then(parseOrigins).then(function(list){
+      if (list.length) return list;
+      return pagesFile('origins.json').then(parseOrigins);
+    }).then(function(list){
+      if (list.length) return list;
+      return apiFile('target.txt').then(single);
+    }).then(function(list){
+      if (list.length) return list;
+      return pagesFile('target.txt').then(single);
+    });
+  }
+  function probeOrigin(origin){
+    // True liveness check that needs no CORS and no app change: load
+    // the app's small favicon as an image. A live tunnel serves real
+    // .ico bytes (onload); a dead tunnel answers an HTML error page or
+    // fails outright (onerror). The 4s timeout doubles as a speed gate:
+    // a crawling tunnel (~1.8 KB/s needs ~5s for the 8.7KB icon) is
+    // skipped in favor of a faster standby.
+    return new Promise(function(resolve){
+      var done = false;
+      var img = new Image();
+      var timer = setTimeout(function(){
+        if (done) return; done = true; img.src = ''; resolve(false);
+      }, 4000);
+      img.onload = function(){ if (done) return; done = true; clearTimeout(timer); resolve(true); };
+      img.onerror = function(){ if (done) return; done = true; clearTimeout(timer); resolve(false); };
+      img.src = origin.replace(/\/+$/, '') + '/favicon.ico?v=' + Date.now();
+    });
   }
   function go(){
     attempts++;
     statusEl.textContent = attempts > 1 ? ('Still connecting… (try ' + attempts + ')') : 'Connecting…';
-    fetchTarget()
-      .then(function(txt){
-        var target = (txt || '').trim();
-        if (!isValid(target)) throw new Error('bad target');
+    fetchOrigins()
+      .then(function(origins){
+        if (!origins.length) throw new Error('no origins');
+        // Try each origin in order; the first one that truly answers
+        // wins, so a dead primary never strands a visitor while the
+        // door-sync + Pages window is still catching up.
+        var chain = Promise.resolve(null);
+        origins.forEach(function(origin){
+          chain = chain.then(function(found){
+            if (found) return found;
+            return probeOrigin(origin).then(function(ok){ return ok ? origin : null; });
+          });
+        });
+        return chain.then(function(found){
+          if (!found) throw new Error('no healthy origin');
+          return found;
+        });
+      })
+      .then(function(target){
         var base = target.replace(/\/+$/, '');
         var key = ownerKey();
         if (key) {
           // Owner entry: hand the key straight to the app's owner-enter
-          // endpoint on the CURRENT app address (from target.txt, so this
-          // bookmark survives every tunnel rotation). The endpoint 302s
-          // to the app's /door page, which completes the sign-in.
+          // endpoint on the CHOSEN healthy address (from origins.json,
+          // so this bookmark survives every tunnel rotation). The
+          // endpoint 302s to the app's /door page, which completes the
+          // sign-in.
           statusEl.textContent = 'Opening your door…';
           window.location.replace(base + '/api/auth/owner-enter?key=' + encodeURIComponent(key));
           return;
