@@ -130,43 +130,94 @@
       img.src = origin.replace(/\/+$/, '') + '/presidential/hero-skyline.webp?v=' + Date.now();
     });
   }
+  function verifyApp(origin){
+    // FINAL app-serving check (door fix 2026-10-29): the 2026-10-28
+    // stranding proved a probe can pass and the origin can still 502
+    // on the real page — the tunnel died in the gap between probe
+    // and redirect, and once the browser has navigated to a dead
+    // origin no door code runs anymore, so a same-tab retry just
+    // re-requests the dead URL. This check runs milliseconds before
+    // the redirect: it loads the same real ~181KB app asset as the
+    // bulk gate with a fresh cache-buster, and only a full-body
+    // onload counts. If it fails, the caller drops this origin and
+    // re-selects from the rest instead of stranding the tab. No
+    // CORS is needed (plain <img> load, like the other probes).
+    // Timeout 8s (~22 KB/s floor on this asset). If the asset ever
+    // moves, every origin fails this check and selection degrades
+    // to the first-alive fallback below — a redirect still happens,
+    // just without this protection.
+    return new Promise(function(resolve){
+      var done = false;
+      var img = new Image();
+      var timer = setTimeout(function(){
+        if (done) return; done = true; img.src = ''; resolve(false);
+      }, 8000);
+      img.onload = function(){ if (done) return; done = true; clearTimeout(timer); resolve(true); };
+      img.onerror = function(){ if (done) return; done = true; clearTimeout(timer); resolve(false); };
+      img.src = origin.replace(/\/+$/, '') + '/presidential/hero-skyline.webp?v=' + Date.now();
+    });
+  }
+  function pickTarget(origins){
+    // Favicon-probe each origin in order; every origin that truly
+    // answers joins the alive list, so a dead primary never
+    // strands a visitor while the door-sync + Pages window is
+    // still catching up.
+    var chain = Promise.resolve([]);
+    origins.forEach(function(origin){
+      chain = chain.then(function(alive){
+        return probeOrigin(origin).then(function(ok){
+          if (ok) alive.push(origin);
+          return alive;
+        });
+      });
+    });
+    return chain.then(function(alive){
+      if (!alive.length) throw new Error('no healthy origin');
+      if (alive.length === 1) return alive[0];
+      // Two or more alive: prefer the first whose bulk download
+      // actually finishes (soft bulk gate); if none passes, the
+      // first alive origin still wins — slow beats stranded.
+      return new Promise(function(resolve){
+        var settled = false;
+        alive.forEach(function(origin){
+          probeBulk(origin).then(function(ok){
+            if (ok && !settled) { settled = true; resolve(origin); }
+          });
+        });
+        setTimeout(function(){
+          if (!settled) { settled = true; resolve(alive[0]); }
+        }, 20000);
+      });
+    });
+  }
+  function chooseAndGo(origins, tried){
+    // Verify-then-redirect loop: pick a winner, prove it still serves
+    // the app, and only then let go() redirect to it. A winner that
+    // fails the final check is dropped and selection re-runs over
+    // the remaining origins with fresh probes. If every origin fails
+    // the final check, the last winner is still returned — slow
+    // beats stranded, exactly today's fallback, just 8s later.
+    // Each pass drops one origin, so this always terminates.
+    var candidates = origins.filter(function(o){ return tried.indexOf(o) === -1; });
+    if (!candidates.length) throw new Error('no healthy origin');
+    return pickTarget(candidates).then(function(winner){
+      return verifyApp(winner).then(function(ok){
+        if (ok) return winner;
+        statusEl.textContent = 'That address just went down — trying another…';
+        tried.push(winner);
+        var rest = origins.filter(function(o){ return tried.indexOf(o) === -1; });
+        if (!rest.length) return winner;
+        return chooseAndGo(origins, tried);
+      });
+    });
+  }
   function go(){
     attempts++;
     statusEl.textContent = attempts > 1 ? ('Still connecting… (try ' + attempts + ')') : 'Connecting…';
     fetchOrigins()
       .then(function(origins){
         if (!origins.length) throw new Error('no origins');
-        // Favicon-probe each origin in order; every origin that truly
-        // answers joins the alive list, so a dead primary never
-        // strands a visitor while the door-sync + Pages window is
-        // still catching up.
-        var chain = Promise.resolve([]);
-        origins.forEach(function(origin){
-          chain = chain.then(function(alive){
-            return probeOrigin(origin).then(function(ok){
-              if (ok) alive.push(origin);
-              return alive;
-            });
-          });
-        });
-        return chain.then(function(alive){
-          if (!alive.length) throw new Error('no healthy origin');
-          if (alive.length === 1) return alive[0];
-          // Two or more alive: prefer the first whose bulk download
-          // actually finishes (soft bulk gate); if none passes, the
-          // first alive origin still wins — slow beats stranded.
-          return new Promise(function(resolve){
-            var settled = false;
-            alive.forEach(function(origin){
-              probeBulk(origin).then(function(ok){
-                if (ok && !settled) { settled = true; resolve(origin); }
-              });
-            });
-            setTimeout(function(){
-              if (!settled) { settled = true; resolve(alive[0]); }
-            }, 20000);
-          });
-        });
+        return chooseAndGo(origins, []);
       })
       .then(function(target){
         var base = target.replace(/\/+$/, '');
