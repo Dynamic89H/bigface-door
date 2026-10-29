@@ -102,25 +102,76 @@
       img.src = origin.replace(/\/+$/, '') + '/favicon.ico?v=' + Date.now();
     });
   }
+  function probeBulk(origin){
+    // SOFT bulk gate (sweep 2026-10-28, fix #5): a tunnel can pass the
+    // 8.7KB favicon probe yet still crawl on real page downloads, so
+    // when MORE THAN ONE origin is alive, race a full ~110KB app-index
+    // download (no-cors + arrayBuffer, so the whole body must arrive)
+    // and prefer the first origin whose bulk download actually
+    // finishes within 20s. It is deliberately SOFT: with a single
+    // alive origin the gate never runs (no delay added to the common
+    // case), and if no origin passes bulk, the first alive origin
+    // still wins — a slow door is better than no door.
+    return new Promise(function(resolve){
+      var done = false;
+      var timer = null;
+      try {
+        var ctrl = ('AbortController' in window) ? new AbortController() : null;
+        timer = setTimeout(function(){
+          if (done) return; done = true;
+          try { if (ctrl) ctrl.abort(); } catch (e) {}
+          resolve(false);
+        }, 20000);
+        var opts = {cache: 'no-store', mode: 'no-cors'};
+        if (ctrl) opts.signal = ctrl.signal;
+        fetch(origin.replace(/\/+$/, '') + '/?v=' + Date.now(), opts).then(function(r){
+          return r.arrayBuffer();
+        }).then(function(){
+          if (done) return; done = true; clearTimeout(timer); resolve(true);
+        }).catch(function(){
+          if (done) return; done = true; clearTimeout(timer); resolve(false);
+        });
+      } catch (e) {
+        if (done) return; done = true; if (timer) clearTimeout(timer); resolve(false);
+      }
+    });
+  }
   function go(){
     attempts++;
     statusEl.textContent = attempts > 1 ? ('Still connecting… (try ' + attempts + ')') : 'Connecting…';
     fetchOrigins()
       .then(function(origins){
         if (!origins.length) throw new Error('no origins');
-        // Try each origin in order; the first one that truly answers
-        // wins, so a dead primary never strands a visitor while the
-        // door-sync + Pages window is still catching up.
-        var chain = Promise.resolve(null);
+        // Favicon-probe each origin in order; every origin that truly
+        // answers joins the alive list, so a dead primary never
+        // strands a visitor while the door-sync + Pages window is
+        // still catching up.
+        var chain = Promise.resolve([]);
         origins.forEach(function(origin){
-          chain = chain.then(function(found){
-            if (found) return found;
-            return probeOrigin(origin).then(function(ok){ return ok ? origin : null; });
+          chain = chain.then(function(alive){
+            return probeOrigin(origin).then(function(ok){
+              if (ok) alive.push(origin);
+              return alive;
+            });
           });
         });
-        return chain.then(function(found){
-          if (!found) throw new Error('no healthy origin');
-          return found;
+        return chain.then(function(alive){
+          if (!alive.length) throw new Error('no healthy origin');
+          if (alive.length === 1) return alive[0];
+          // Two or more alive: prefer the first whose bulk download
+          // actually finishes (soft bulk gate); if none passes, the
+          // first alive origin still wins — slow beats stranded.
+          return new Promise(function(resolve){
+            var settled = false;
+            alive.forEach(function(origin){
+              probeBulk(origin).then(function(ok){
+                if (ok && !settled) { settled = true; resolve(origin); }
+              });
+            });
+            setTimeout(function(){
+              if (!settled) { settled = true; resolve(alive[0]); }
+            }, 20000);
+          });
         });
       })
       .then(function(target){
@@ -144,7 +195,12 @@
         window.location.replace(base + (rest ? rest : '/inside'));
       })
       .catch(function(){
-        statusEl.textContent = 'Connection hiccup — retrying in 10 seconds…';
+        // After 3 failed cycles, say something useful instead of
+        // looping the same line forever (sweep fix #6): the door keeps
+        // retrying on its own, and the saved door link still works.
+        statusEl.textContent = attempts >= 3
+          ? 'Still can\'t reach Big Face — its address may be switching right now. This page keeps retrying; your saved door link still works.'
+          : 'Connection hiccup — retrying in 10 seconds…';
         setTimeout(go, 10000);
       });
   }
