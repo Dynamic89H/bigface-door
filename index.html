@@ -103,37 +103,31 @@
     });
   }
   function probeBulk(origin){
-    // SOFT bulk gate (sweep 2026-10-28, fix #5): a tunnel can pass the
-    // 8.7KB favicon probe yet still crawl on real page downloads, so
-    // when MORE THAN ONE origin is alive, race a full ~110KB app-index
-    // download (no-cors + arrayBuffer, so the whole body must arrive)
-    // and prefer the first origin whose bulk download actually
-    // finishes within 20s. It is deliberately SOFT: with a single
-    // alive origin the gate never runs (no delay added to the common
-    // case), and if no origin passes bulk, the first alive origin
-    // still wins — a slow door is better than no door.
+    // TRUE bulk gate (door fix 2026-10-29): the 2026-10-28 version
+    // fetched '/' with mode no-cors and awaited arrayBuffer() — but a
+    // no-cors response is OPAQUE, so arrayBuffer() resolves at once
+    // with an empty body when headers arrive; it never waited for bulk
+    // bytes, and a crawling tunnel passed it (proven 2026-10-29: the
+    // crawling standby answered headers instantly yet could not
+    // finish 181KB in 25s). This version loads a real ~181KB stable
+    // app asset as an <img>: onload fires ONLY after the full body
+    // arrives, so a tunnel that dribbles bytes fails the 20s timeout
+    // (a ~9 KB/s floor on this asset). It stays deliberately SOFT:
+    // with a single alive origin the gate never runs (no delay added
+    // to the common case), and if no origin passes bulk, the first
+    // alive origin still wins — a slow door is better than no door.
+    // If the asset ever moves, every origin fails bulk and behavior
+    // degrades to the first-alive rule, never a strand. The
+    // cache-buster matters: a cached fast load must not mask a crawl.
     return new Promise(function(resolve){
       var done = false;
-      var timer = null;
-      try {
-        var ctrl = ('AbortController' in window) ? new AbortController() : null;
-        timer = setTimeout(function(){
-          if (done) return; done = true;
-          try { if (ctrl) ctrl.abort(); } catch (e) {}
-          resolve(false);
-        }, 20000);
-        var opts = {cache: 'no-store', mode: 'no-cors'};
-        if (ctrl) opts.signal = ctrl.signal;
-        fetch(origin.replace(/\/+$/, '') + '/?v=' + Date.now(), opts).then(function(r){
-          return r.arrayBuffer();
-        }).then(function(){
-          if (done) return; done = true; clearTimeout(timer); resolve(true);
-        }).catch(function(){
-          if (done) return; done = true; clearTimeout(timer); resolve(false);
-        });
-      } catch (e) {
-        if (done) return; done = true; if (timer) clearTimeout(timer); resolve(false);
-      }
+      var img = new Image();
+      var timer = setTimeout(function(){
+        if (done) return; done = true; img.src = ''; resolve(false);
+      }, 20000);
+      img.onload = function(){ if (done) return; done = true; clearTimeout(timer); resolve(true); };
+      img.onerror = function(){ if (done) return; done = true; clearTimeout(timer); resolve(false); };
+      img.src = origin.replace(/\/+$/, '') + '/presidential/hero-skyline.webp?v=' + Date.now();
     });
   }
   function go(){
